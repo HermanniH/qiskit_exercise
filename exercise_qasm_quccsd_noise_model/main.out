@@ -1,0 +1,240 @@
+#INFO: **** input file is /Users/mario/Documents/GitHub/qiskit_exercise/main.py ****
+# initial imports from qiskit
+
+from qiskit                                        import *
+from qiskit.chemistry.drivers                      import UnitsType,HFMethodType
+from qiskit.chemistry.core                         import Hamiltonian,TransformationType,QubitMappingType
+from qiskit.chemistry.components.initial_states    import HartreeFock
+from qiskit.chemistry.components.variational_forms import UCCSD
+from qiskit.aqua.components.optimizers             import L_BFGS_B,COBYLA
+from qiskit.aqua.algorithms                        import VQE
+from qiskit.aqua                                   import QuantumInstance,aqua_globals
+
+# very verbose output, helpful for debugging
+#import logging
+#from   qiskit.chemistry import set_qiskit_chemistry_logging
+#set_qiskit_chemistry_logging(logging.DEBUG)
+
+# generation of a molecule object; 
+# PySCF driver slightly tweaked to allow molecular symmetries to be enforced at SCF level
+# and visualization of SCF orbitals
+import sys
+sys.path.append('./pyscfd')
+from pyscfdriver import *
+from utils       import *
+
+outfile   = open('qiskit_vqe.txt','w')
+driver    = PySCFDriver(atom='''S 0.0000 0.0000 0.1030; H 0.0000 0.9616 -0.8239; H 0.0000 -0.9616 -0.8239''',
+                        unit=UnitsType.ANGSTROM,charge=0,spin=0,basis='sto-6g',hf_method=HFMethodType.RHF,symgroup='C2v',outfile=outfile)
+molecule  = driver.run()
+
+# qubit representation of the Hamiltonian (possibly in an active space of chosen orbitals)
+orb_red   = [0,1,2,3,4]     # simple frozen core
+orb_red   = [0,1,2,3,4,5,8] # simple frozen core and out-of-plane orbital reduction
+core      = Hamiltonian(transformation=TransformationType.FULL,qubit_mapping=QubitMappingType.PARITY,
+                        two_qubit_reduction=True,freeze_core=False,orbital_reduction=orb_red)
+H_op,A_op = core.run(molecule)
+
+# tapering off symmetries to reduce the number of qubits
+z2syms,sqlist           = None,None
+H_op,A_op,z2syms,sqlist = taper(molecule,core,H_op,A_op,outfile)
+
+# hartree-fock and VQE-qUCCSD
+init_state = HartreeFock(num_orbitals=core._molecule_info['num_orbitals'],qubit_mapping=core._qubit_mapping,
+                         two_qubit_reduction=core._two_qubit_reduction,num_particles=core._molecule_info['num_particles'],sq_list=sqlist)
+circuit    = init_state.construct_circuit()
+
+outfile.write("\nHartree-Fock energy %f \n" % (molecule.hf_energy))
+outfile.write("\nHartree-Fock circuit\n")
+outfile.write(str(circuit.draw())+"\n")
+
+var_form  = UCCSD(num_orbitals=core._molecule_info['num_orbitals'],num_particles=core._molecule_info['num_particles'],active_occupied=None,active_unoccupied=None,
+                  initial_state=init_state,qubit_mapping=core._qubit_mapping,two_qubit_reduction=core._two_qubit_reduction,num_time_slices=1,z2_symmetries=z2syms)
+
+optimizer = L_BFGS_B(maxiter=1000)
+algo      = VQE(H_op,var_form,optimizer,aux_operators=A_op)
+
+backend          = Aer.get_backend('statevector_simulator')
+quantum_instance = QuantumInstance(backend=backend)
+algo_result      = algo.run(quantum_instance)
+get_results(H_op,A_op,molecule,core,algo_result,outfile)
+print_UCCSD_parameters(molecule,core,var_form,algo_result,z2syms,sqlist,orb_red,outfile)
+
+circuit = var_form.construct_circuit(algo_result['optimal_point'])
+
+def transpilation(c,machine,opt,layout):
+    provider = IBMQ.load_account()
+    provider = IBMQ.get_provider(hub='ibm-q')
+    backend  = provider.get_backend(machine)
+    from qiskit.compiler import transpile
+    transpiled_circuit = transpile(c,backend,initial_layout=layout,optimization_level=opt)
+    return transpiled_circuit
+
+circuit = transpilation(circuit,'ibmq_burlington',3,layout=range(H_op.num_qubits))
+print("operations ",circuit.count_ops())
+print("depth      ",circuit.depth())
+print("width      ",circuit.width())
+print("size       ",circuit.size())
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Darwin', node='Marios-MacBook-Pro.local', release='19.5.0', version='Darwin Kernel Version 19.5.0: Tue May 26 20:41:44 PDT 2020; root:xnu-6153.121.2~2/RELEASE_X86_64', machine='x86_64', processor='i386')  Threads 1
+Python 3.7.7 (default, May  6 2020, 04:59:01) 
+[Clang 4.0.1 (tags/RELEASE_401/final)]
+numpy 1.18.5  scipy 1.4.1
+Date: Mon Jul 13 14:01:23 2020
+PySCF version 1.7.3
+PySCF path  /Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 3
+[INPUT] num. electrons = 18
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry C2v subgroup None
+[INPUT] Mole.unit = Angstrom
+[INPUT]  1 S      0.000000000000   0.000000000000   0.103000000000 AA    0.000000000000   0.000000000000   0.194641790830 Bohr
+[INPUT]  2 H      0.000000000000   0.961600000000  -0.823900000000 AA    0.000000000000   1.817160641382  -1.556945354029 Bohr
+[INPUT]  3 H      0.000000000000  -0.961600000000  -0.823900000000 AA    0.000000000000  -1.817160641382  -1.556945354029 Bohr
+
+nuclear repulsion = 12.9538864725688
+point group symmetry = C2v
+num. orbitals of irrep A1 = 6
+num. orbitals of irrep B1 = 3
+num. orbitals of irrep B2 = 2
+number of shells = 7
+number of NR pGTOs = 66
+number of NR cGTOs = 11
+basis = sto-6g
+ecp = {}
+CPU time:         4.09
+
+
+******** <class 'pyscf.scf.hf_symm.SymAdaptedRHF'> ********
+method = SymAdaptedRHF-RHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /var/folders/7m/f464jvrs78n7m3djcnsxfxgr0000gn/T/tmprh10hkmu
+max_memory 4000 MB (current use 0 MB)
+Freeze 0 electrons in irreps []
+    18 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+init E= -396.959487564463
+HOMO (B2) = -0.242404854012909  LUMO (B1) = 0.314788350417471
+cycle= 1 E= -397.284386204454  delta_E= -0.325  |g|= 0.232  |ddm|= 1.79
+HOMO (B2) = -0.230280901253732  LUMO (B1) = 0.474869785522528
+cycle= 2 E= -397.310474592439  delta_E= -0.0261  |g|= 0.0146  |ddm|= 0.463
+HOMO (B2) = -0.281080572918563  LUMO (B1) = 0.463534041659627
+cycle= 3 E= -397.310537392476  delta_E= -6.28e-05  |g|= 0.00301  |ddm|= 0.0195
+HOMO (B2) = -0.280800800443355  LUMO (B1) = 0.464128794280753
+cycle= 4 E= -397.31054377185  delta_E= -6.38e-06  |g|= 0.000629  |ddm|= 0.00783
+HOMO (B2) = -0.280717942894437  LUMO (B1) = 0.464241867561174
+cycle= 5 E= -397.310544086773  delta_E= -3.15e-07  |g|= 4.76e-05  |ddm|= 0.00226
+HOMO (B2) = -0.280713149458252  LUMO (B1) = 0.464247003649198
+cycle= 6 E= -397.310544088263  delta_E= -1.49e-09  |g|= 6.27e-07  |ddm|= 0.000178
+HOMO (B2) = -0.280713065041184  LUMO (B1) = 0.464246653061798
+cycle= 7 E= -397.310544088263  delta_E= -3.41e-13  |g|= 1.14e-08  |ddm|= 2.29e-06
+HOMO (B2) = -0.280713064362277  LUMO (B1) = 0.464246655866766
+Extra cycle  E= -397.310544088263  delta_E= 3.41e-13  |g|= 2.25e-09  |ddm|= 1.82e-08
+converged SCF energy = -397.310544088263
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/chemistry/core/hamiltonian.py:408: DeprecationWarning: Processing a dictionary result is deprecated, pass a (minimum) eigensolver result now.
+  ' pass a (minimum) eigensolver result now.', DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:64: DeprecationWarning: energy deprecated, use eigenvalues property.
+  warnings.warn('energy deprecated, use eigenvalues property.', DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:64: DeprecationWarning: energy deprecated, use eigenvalues property.
+  warnings.warn('energy deprecated, use eigenvalues property.', DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:79: DeprecationWarning: aux_ops deprecated, use aux_operator_eigenvalues property.
+  DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:68: DeprecationWarning: energies deprecated, use eigenvalues property.
+  warnings.warn('energies deprecated, use eigenvalues property.', DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:68: DeprecationWarning: energies deprecated, use eigenvalues property.
+  warnings.warn('energies deprecated, use eigenvalues property.', DeprecationWarning)
+/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/aqua/algorithms/eigen_solvers/eigen_solver_result.py:79: DeprecationWarning: aux_ops deprecated, use aux_operator_eigenvalues property.
+  DeprecationWarning)
+The operator is empty, return the empty operator directly.
+Traceback (most recent call last):
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connection.py", line 160, in _new_conn
+    (self._dns_host, self.port), self.timeout, **extra_kw
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/util/connection.py", line 61, in create_connection
+    for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/socket.py", line 752, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+socket.gaierror: [Errno 8] nodename nor servname provided, or not known
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 677, in urlopen
+    chunked=chunked,
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 381, in _make_request
+    self._validate_conn(conn)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 976, in _validate_conn
+    conn.connect()
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connection.py", line 308, in connect
+    conn = self._new_conn()
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connection.py", line 172, in _new_conn
+    self, "Failed to establish a new connection: %s" % e
+urllib3.exceptions.NewConnectionError: <urllib3.connection.HTTPSConnection object at 0x7fe039752ed0>: Failed to establish a new connection: [Errno 8] nodename nor servname provided, or not known
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/requests/adapters.py", line 449, in send
+    timeout=timeout
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 765, in urlopen
+    **response_kw
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 765, in urlopen
+    **response_kw
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 765, in urlopen
+    **response_kw
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/connectionpool.py", line 725, in urlopen
+    method, url, error=e, _pool=self, _stacktrace=sys.exc_info()[2]
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/api/session.py", line 72, in increment
+    error=error, _pool=_pool, _stacktrace=_stacktrace)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/urllib3/util/retry.py", line 439, in increment
+    raise MaxRetryError(_pool, url, error or ResponseError(cause))
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='auth.quantum-computing.ibm.com', port=443): Max retries exceeded with url: /api/version (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x7fe039752ed0>: Failed to establish a new connection: [Errno 8] nodename nor servname provided, or not known'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/api/session.py", line 249, in request
+    response = super().request(method, final_url, **kwargs)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/requests/sessions.py", line 530, in request
+    resp = self.send(prep, **send_kwargs)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/requests/sessions.py", line 643, in send
+    r = adapter.send(request, **kwargs)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/requests/adapters.py", line 516, in send
+    raise ConnectionError(e, request=request)
+requests.exceptions.ConnectionError: HTTPSConnectionPool(host='auth.quantum-computing.ibm.com', port=443): Max retries exceeded with url: /api/version (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x7fe039752ed0>: Failed to establish a new connection: [Errno 8] nodename nor servname provided, or not known'))
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "main.py", line 72, in <module>
+    circuit = transpilation(circuit,'ibmq_burlington',3,layout=range(H_op.num_qubits))
+  File "main.py", line 65, in transpilation
+    provider = IBMQ.load_account()
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/ibmqfactory.py", line 179, in load_account
+    version_info = self._check_api_version(credentials)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/ibmqfactory.py", line 446, in _check_api_version
+    return version_finder.version()
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/api/clients/version.py", line 51, in version
+    return self.client_version_finder.version()
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/api/rest/version_finder.py", line 44, in version
+    response = self.session.get(url)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/requests/sessions.py", line 543, in get
+    return self.request('GET', url, **kwargs)
+  File "/Users/mario/anaconda3/envs/qiskitdev/lib/python3.7/site-packages/qiskit/providers/ibmq/api/session.py", line 270, in request
+    raise RequestsApiError(message) from ex
+qiskit.providers.ibmq.api.exceptions.RequestsApiError: "HTTPSConnectionPool(host='auth.quantum-computing.ibm.com', port=443): Max retries exceeded with url: /api/version (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x7fe039752ed0>: Failed to establish a new connection: [Errno 8] nodename nor servname provided, or not known'))"

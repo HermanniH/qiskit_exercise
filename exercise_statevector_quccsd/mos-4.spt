@@ -1,0 +1,20 @@
+
+        initialize;
+        set background [xffffff];
+        set frank off
+        set autoBond true;
+        set bondRadiusMilliAngstroms 66;
+        set bondTolerance 0.5;
+        set forceAutoBond false;
+        load mos-4.molden
+        
+        zoom 130;
+        rotate -20 z
+        rotate -60 x
+        axes
+        MO COLOR [xff0020] [x0060ff];
+        MO COLOR translucent 0.25;
+        MO fill noDots noMesh;
+        MO titleformat "";
+        MO 5 cutoff 0.02;
+write IMAGE 400 400 PNG 180 "mos-05.png";
